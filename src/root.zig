@@ -204,17 +204,53 @@ fn editAt(allocator: std.mem.Allocator, node: *Node, node_start: usize, start: u
 
                     switch (child_result) {
                         .single => |new_child| {
-                            if (!shared) {
-                                children[i] = new_child;
-                                node.summary = recomputeSummary(children);
-                                return .{ .single = node };
-                            } else {
-                                const new_children = try allocator.alloc(*Node, children.len);
-                                for (children, 0..) |c, j| {
-                                    new_children[j] = if (j == i) new_child else c.retain();
+                            if (new_child.body == .leaf and new_child.body.leaf.len == 0) {
+                                new_child.release(allocator);
+
+                                var new_children = try allocator.alloc(*Node, children.len - 1);
+                                for (children[0..i], 0..) |c, j| {
+                                    new_children[j] = if (shared) c.retain() else c;
                                 }
-                                node.release(allocator);
-                                return .{ .single = try Node.createInternal(allocator, new_children, node.height) };
+                                for (children[i + 1 ..], 0..) |c, j| {
+                                    new_children[i + j] = if (shared) c.retain() else c;
+                                }
+
+                                if (shared) {
+                                    node.release(allocator);
+                                } else {
+                                    allocator.free(children);
+                                }
+
+                                if (new_children.len == 0)
+                                    unreachable;
+
+                                if (new_children.len == 1) {
+                                    const only_child = new_children[0];
+                                    allocator.free(new_children);
+                                    if (!shared) allocator.destroy(node);
+                                    return .{ .single = only_child };
+                                }
+
+                                if (shared) {
+                                    return .{ .single = try Node.createInternal(allocator, new_children, node.height) };
+                                } else {
+                                    node.body = .{ .internal = new_children };
+                                    node.summary = recomputeSummary(new_children);
+                                    return .{ .single = node };
+                                }
+                            } else {
+                                if (!shared) {
+                                    children[i] = new_child;
+                                    node.summary = recomputeSummary(children);
+                                    return .{ .single = node };
+                                } else {
+                                    const new_children = try allocator.alloc(*Node, children.len);
+                                    for (children, 0..) |c, j| {
+                                        new_children[j] = if (j == i) new_child else c.retain();
+                                    }
+                                    node.release(allocator);
+                                    return .{ .single = try Node.createInternal(allocator, new_children, node.height) };
+                                }
                             }
                         },
                         .split => |s| {
@@ -671,6 +707,25 @@ test "merge on delete" {
     try tree.edit(2, 4, "");
 
     try std.testing.expectEqual(1, tree.root.height);
+}
+
+test "empty leaf cleanup on single-leaf delete" {
+    const alloc = std.testing.allocator;
+
+    max_leaf = 2;
+    max_children = 2;
+
+    var tree = try Tree.fromText(alloc, "abcdef");
+    defer tree.deinit();
+
+    try tree.edit(2, 4, "");
+
+    const text = try tree.toText();
+    defer alloc.free(text);
+    try std.testing.expectEqualStrings("abef", text);
+
+    try std.testing.expect(tree.root.body.internal[0].body == .leaf);
+    try std.testing.expectEqualStrings("ab", tree.root.body.internal[0].body.leaf);
 }
 
 test "utf8 break guard" {
